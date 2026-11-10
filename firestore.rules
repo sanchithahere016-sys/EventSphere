@@ -1,0 +1,98 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.role == 'Administrator' || 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Administrator');
+    }
+
+    function isOrganizer() {
+      return isAuthenticated() && 
+        (request.auth.token.role == 'Event Organizer' || 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Event Organizer' ||
+         isAdmin());
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // 2. Events Collection
+    match /events/{eventId} {
+      // Anyone can discover verified and published events
+      allow read: if true;
+
+      // Only organizers & admins can submit new events
+      // Force initial status to PENDING VERIFICATION
+      allow create: if isOrganizer() && 
+        request.resource.data.status == 'Pending Verification' &&
+        request.resource.data.organizerId == request.auth.uid;
+
+      // Event updates
+      allow update: if 
+        // Admin can approve, reject, or update any field
+        isAdmin() ||
+        // Organizer can edit description/venue before approval, but CANNOT alter status, trustScore, or confirmations
+        (isOrganizer() && 
+         resource.data.organizerId == request.auth.uid &&
+         request.resource.data.status == resource.data.status &&
+         request.resource.data.trustScore == resource.data.trustScore);
+
+      allow delete: if isAdmin() || (isOrganizer() && resource.data.organizerId == request.auth.uid);
+    }
+
+    // 3. Confirmations Collection
+    match /confirmations/{confirmationId} {
+      allow read: if true;
+      // Prevent duplicate confirmation & self-confirmation
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.userId != get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.organizerId;
+      allow update, delete: if isAdmin();
+    }
+
+    // 4. Reports Collection
+    match /reports/{reportId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin();
+    }
+
+    // 5. Check-Ins Collection
+    match /checkins/{checkInId} {
+      allow read: if isAuthenticated();
+      // Only allow check-in for Verified events
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid &&
+        get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.status == 'Verified';
+      allow update, delete: if isAdmin();
+    }
+
+    // 6. Favourites Collection
+    match /favourites/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // 7. Notifications Collection
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+      allow create: if isAdmin() || isAuthenticated();
+      allow delete: if isAuthenticated() && resource.data.recipientId == request.auth.uid;
+    }
+  }
+}
